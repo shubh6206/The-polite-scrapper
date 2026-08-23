@@ -1,7 +1,7 @@
 """
 The Polite Scraper - Main Pipeline
 FlyRank Backend Track Week 5 Assignment A9
-Stage 3: Extract Book Details
+Stage 4: Normalize and Validate
 """
 
 import json
@@ -12,17 +12,23 @@ from pathlib import Path
 from typing import Any, Dict, List, Tuple
 from urllib.parse import urlparse
 
+from pydantic import ValidationError
+
 from src.fetcher import PoliteFetcher, FetchError
 from src.parser import (
     extract_catalogue_book_urls,
     extract_next_page_url,
     extract_book_details,
 )
+from src.normalizer import normalize_raw_record
+from src.models import BookRecord, RecordValidationError
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 CACHE_DIR = BASE_DIR / "cache"
 BOOKS_CACHE_DIR = CACHE_DIR / "books"
 OUTPUT_DIR = BASE_DIR / "output"
+BOOKS_JSON = OUTPUT_DIR / "books.json"
+ERRORS_JSON = OUTPUT_DIR / "errors.json"
 
 START_URL = "https://books.toscrape.com/catalogue/page-1.html"
 MAX_CATALOGUE_PAGES = 3
@@ -32,7 +38,6 @@ def url_to_cache_filename(url: str) -> str:
     """Converts a book URL to a safe, readable cache filename."""
     path_parts = [p for p in urlparse(url).path.split("/") if p and p != "index.html"]
     slug = path_parts[-1] if path_parts else "unknown_book"
-    # Ensure safe filename
     safe_slug = re.sub(r"[^a-zA-Z0-9_\-]", "_", slug)
     return f"{safe_slug}.html"
 
@@ -122,38 +127,90 @@ def extract_all_book_details(
     return raw_records
 
 
-def run_stage_3() -> None:
+def normalize_and_validate_records(
+    raw_records: List[Dict[str, Any]],
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """
+    Normalizes raw records, deduplicates by canonical product URL, and validates against Pydantic schema.
+    Returns: Tuple[valid_records (List[dict]), invalid_records (List[dict])]
+    """
+    valid_records_dict: Dict[str, Dict[str, Any]] = {}
+    invalid_records: List[Dict[str, Any]] = []
+
+    for raw in raw_records:
+        canonical_url = str(raw.get("product_url", "")).strip()
+
+        try:
+            # 1. Normalize
+            normalized = normalize_raw_record(raw)
+            # 2. Validate against Pydantic schema
+            validated_model = BookRecord(**normalized)
+            record_dict = validated_model.dict()
+
+            # 3. Deduplicate by canonical product URL (idempotent storage)
+            valid_records_dict[record_dict["product_url"]] = record_dict
+
+        except (ValidationError, ValueError, Exception) as e:
+            err = RecordValidationError(raw_record=raw, error_reason=str(e))
+            invalid_records.append(err.dict())
+
+    return list(valid_records_dict.values()), invalid_records
+
+
+def save_output(
+    valid_records: List[Dict[str, Any]],
+    invalid_records: List[Dict[str, Any]],
+    output_dir: Path = OUTPUT_DIR,
+) -> None:
+    """Writes valid records to books.json and invalid records to errors.json."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    books_file = output_dir / "books.json"
+    errors_file = output_dir / "errors.json"
+
+    with open(books_file, "w", encoding="utf-8") as f:
+        json.dump(valid_records, f, indent=2, ensure_ascii=False)
+
+    with open(errors_file, "w", encoding="utf-8") as f:
+        json.dump(invalid_records, f, indent=2, ensure_ascii=False)
+
+    print(f"\n[OUTPUT] Saved {len(valid_records)} valid records to {books_file.name}")
+    print(f"[OUTPUT] Saved {len(invalid_records)} invalid records to {errors_file.name}")
+
+
+def run_pipeline() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     BOOKS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     fetcher = PoliteFetcher()
 
-    try:
-        # 1. Discover catalogue books
-        book_items = discover_catalogue_books(fetcher)
-        print(f"\nDiscovered {len(book_items)} unique book URLs.")
+    # 1. Discover catalogue books
+    book_items = discover_catalogue_books(fetcher)
 
-        # 2. Extract details
-        raw_records = extract_all_book_details(fetcher, book_items)
+    # 2. Extract raw details
+    raw_records = extract_all_book_details(fetcher, book_items)
 
-        # 3. Print Checkpoint Results
-        print("\n" + "=" * 60)
-        print("STAGE 3 CHECKPOINT RESULT:")
-        print(f"detail_pages={len(raw_records)}")
-        print("=" * 60)
+    # 3. Normalize & Validate
+    valid_records, invalid_records = normalize_and_validate_records(raw_records)
 
-        if raw_records:
-            print("\nSample Raw Record (Complete 8 fields):")
-            print(json.dumps(raw_records[0], indent=2, ensure_ascii=False))
+    # 4. Save clean outputs
+    save_output(valid_records, invalid_records)
 
-    except FetchError as e:
-        print(f"[ERROR] Stage 3 failed: {e}", file=sys.stderr)
-        sys.exit(1)
+    return valid_records, invalid_records
 
 
 def main() -> None:
-    run_stage_3()
+    try:
+        valid_records, invalid_records = run_pipeline()
+        print("\n" + "=" * 60)
+        print("STAGE 4 CHECKPOINT RESULT:")
+        print(f"valid_records={len(valid_records)}")
+        print(f"invalid_records={len(invalid_records)}")
+        print("=" * 60)
+    except FetchError as e:
+        print(f"[ERROR] Pipeline failed: {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
