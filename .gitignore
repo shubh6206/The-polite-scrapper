@@ -1,0 +1,25 @@
+# Cache directory
+cache/*
+!cache/.gitkeep
+
+# Output directory
+output/*.json
+!output/.gitkeep
+
+# Zip archives
+*.zip
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+ENV/
+.env
+.idea/
+.vscode/
